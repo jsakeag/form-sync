@@ -39,6 +39,7 @@ let savedClips = {};
 let clock = null;
 let saveTimer = 0;
 let toastTimer = 0;
+const stats = { jumps: {} };
 
 const stage = $('#stage');
 const lanes = $('#lanes');
@@ -94,22 +95,37 @@ function computeRange() {
 
 // ---------------------------------------------------------------- loading
 
+// Resolves once the video can play without stalling. Some browsers never fire
+// canplaythrough for a paused video, so fall back after a few seconds of being decodable.
+function whenPlayable(video, name) {
+  return new Promise((resolve, reject) => {
+    let fallback = 0;
+    const done = () => { clearTimeout(fallback); resolve(); };
+    video.addEventListener('canplaythrough', done, { once: true });
+    video.addEventListener('loadeddata', () => { fallback = setTimeout(done, 3000); }, { once: true });
+    video.addEventListener('error', () => reject(new Error(`${name}: this browser can't play it`)), { once: true });
+  });
+}
+
 async function loadClip({ name, url }) {
+  // Load the whole file into memory once: the frame table is parsed from it and the
+  // video plays from it, so playback never waits on the network.
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${name}: ${res.status} ${res.statusText}`);
+  const blob = await res.blob();
+
   const video = document.createElement('video');
   video.muted = true;
   video.defaultMuted = true;
   video.playsInline = true;
   video.preload = 'auto';
   video.disablePictureInPicture = true;
-  const ready = new Promise((resolve, reject) => {
-    video.addEventListener('loadeddata', resolve, { once: true });
-    video.addEventListener('error', () => reject(new Error(`${name}: this browser can't play it`)), { once: true });
-  });
-  video.src = url;
+  const ready = whenPlayable(video, name);
+  video.src = URL.createObjectURL(blob);
 
   let table = null;
   try {
-    table = parseFrameTable(await (await fetch(url)).arrayBuffer());
+    table = parseFrameTable(await blob.arrayBuffer());
   } catch (err) {
     console.warn(`${name}: couldn't read frame table, assuming 30 fps`, err);
   }
@@ -629,13 +645,25 @@ function play() {
     c.el.play().catch(() => {});
     state.playing = 'solo';
   } else {
-    if (state.g >= state.gMax - 1e-6) state.g = state.gMin;
-    state.clips.forEach(x => { x.el.playbackRate = state.rate; x.hardSeekAt = 0; });
-    clock = { t0: performance.now(), g0: state.g };
     state.playing = 'sync';
+    restartFrom(state.g >= state.gMax - 1e-6 ? state.gMin : state.g);
   }
   updateChrome();
   requestAnimationFrame(tick);
+}
+
+// Park every clip on its frame for position g and hold the clock until all of them
+// have finished seeking, so nothing starts behind and has to jump to catch up.
+function restartFrom(g) {
+  state.g = g;
+  state.clips.forEach(c => {
+    c.el.pause();
+    c.el.playbackRate = state.rate;
+    c.hardSeekAt = 0;
+    const lt = releaseTime(c) + g;
+    seekIdx(c, lt < 0 ? 0 : frameAt(c, lt));
+  });
+  clock = { t0: performance.now(), g0: g, settling: true };
 }
 
 function pause() {
@@ -668,14 +696,22 @@ function tick(now) {
     c.localIdx = frameAt(c, c.el.currentTime);
     updateInfo(c, c.localIdx);
   } else {
-    let g = clock.g0 + ((now - clock.t0) / 1000) * state.rate;
+    if (clock.settling) {
+      if (state.clips.some(c => c.el.seeking)) {
+        updateTimeline();
+        return requestAnimationFrame(tick);
+      }
+      clock = { t0: now, g0: clock.g0 };
+    }
+    const g = clock.g0 + ((now - clock.t0) / 1000) * state.rate;
     if (g > state.gMax) {
       if (!state.loop) {
         state.g = state.gMax;
         return pause();
       }
-      g = state.gMin;
-      clock = { t0: now, g0: g };
+      restartFrom(state.gMin);
+      updateTimeline();
+      return requestAnimationFrame(tick);
     }
     state.g = g;
     for (const c of state.clips) followClock(c, g, now);
@@ -702,9 +738,10 @@ function followClock(c, g, now) {
   if (c.el.seeking) return;
 
   if (c.el.paused) {
-    c.pendingIdx = -1;
+    // Usually already parked on (or next to) the right frame; just start it and let the
+    // rate nudge below absorb the small offset instead of paying for a seek.
+    if (Math.abs(c.el.currentTime - lt) > 4 * c.fd) jump(c, lt + START_LATENCY * state.rate);
     c.shownIdx = -1;
-    c.el.currentTime = lt + START_LATENCY * state.rate;
     c.el.playbackRate = state.rate;
     c.el.play().catch(() => {});
     c.hardSeekAt = now;
@@ -714,14 +751,22 @@ function followClock(c, g, now) {
 
   const drift = c.el.currentTime - lt;
   if (Math.abs(drift) > 4 * c.fd) {
-    c.pendingIdx = -1;
-    c.el.currentTime = lt + START_LATENCY * state.rate;
+    jump(c, lt + START_LATENCY * state.rate);
     c.hardSeekAt = now;
     return;
   }
   const nudged = clamp(state.rate - drift / 0.3, state.rate * 0.5, state.rate * 1.5);
   const rate = Math.max(0.0625, nudged);
   if (Math.abs(c.el.playbackRate - rate) > state.rate * 0.02) c.el.playbackRate = rate;
+}
+
+// A seek made to pull a playing clip back into sync. These are what cause visible
+// hitches, so they're counted: `stats` in the console shows how many happened.
+function jump(c, t) {
+  c.pendingIdx = -1;
+  c.el.currentTime = t;
+  stats.jumps[c.name] = (stats.jumps[c.name] || 0) + 1;
+  console.debug(`sync jump: ${c.name} → ${t.toFixed(3)}s`);
 }
 
 function setRate(r) {
