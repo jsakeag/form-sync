@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Serve Sync</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Serve Sync</div>
+    <div class="mode" id="mode"></div>
+    <div class="spacer"></div>
+    <label class="field">Frame
+      <select id="aspect" title="Aspect ratio of every clip's frame; clips are letterboxed inside it"></select>
+      <input id="aspect-custom" type="text" placeholder="9:16" size="7" hidden>
+    </label>
+    <button id="help-btn" class="icon-btn" title="Keyboard shortcuts (?)">?</button>
+  </header>
+
+  <main id="stage" class="stage">
+    <div class="empty" id="empty">Loading clips…</div>
+  </main>
+
+  <footer class="bottom">
+    <div class="controls">
+      <div class="transport">
+        <button id="btn-start" title="Go to start (Home)"><svg viewBox="0 0 16 16"><path d="M3 2h2v12H3zM14 2v12L6 8z"/></svg></button>
+        <button id="btn-prev" title="Previous frame (←, Shift+← for 10)"><svg viewBox="0 0 16 16"><path d="M11 2v12L3 8zM12 2h2v12h-2z"/></svg></button>
+        <button id="btn-play" title="Play / pause (Space)"><svg viewBox="0 0 16 16"><path id="play-icon" d="M4 2v12l10-6z"/></svg></button>
+        <button id="btn-next" title="Next frame (→, Shift+→ for 10)"><svg viewBox="0 0 16 16"><path d="M5 2v12l8-6zM2 2h2v12H2z"/></svg></button>
+        <button id="btn-end" title="Go to end (End)"><svg viewBox="0 0 16 16"><path d="M11 2h2v12h-2zM2 2v12l8-6z"/></svg></button>
+      </div>
+      <button id="btn-release" class="release-btn" title="Jump to the release frame (Enter or 0)">Go to release</button>
+      <button id="btn-contact" class="contact-btn" title="Jump to the next clip's contact frame (] next, [ previous)">Next contact</button>
+      <div class="readout" id="readout"></div>
+      <div class="spacer"></div>
+      <label class="field">Speed <select id="rate" title="Playback speed (↑/↓)"></select></label>
+      <label class="field check"><input type="checkbox" id="loop"> Loop</label>
+    </div>
+    <div class="timeline" id="timeline">
+      <div class="tl-row global-row">
+        <div class="tl-label">All clips (synced)</div>
+        <div class="tl-track global" id="gtrack"></div>
+      </div>
+      <div id="lanes"></div>
+      <div class="tl-overlay">
+        <div class="tl-zero" id="tl-zero"><span>R</span></div>
+        <div class="tl-head" id="tl-head"></div>
+      </div>
+    </div>
+  </footer>
+
+  <div class="toast" id="toast"></div>
+
+  <dialog id="help">
+    <h2>Shortcuts</h2>
+    <dl>
+      <dt>Space</dt><dd>Play / pause</dd>
+      <dt>← / →</dt><dd>Step one frame (hold Shift for 10)</dd>
+      <dt>Home / End</dt><dd>Go to start / end</dd>
+      <dt>Enter or 0</dt><dd>Go to the release frame</dd>
+      <dt>↑ / ↓</dt><dd>Faster / slower</dd>
+      <dt>L</dt><dd>Toggle loop</dd>
+      <dt>1 – 9</dt><dd>Select a clip to adjust on its own</dd>
+      <dt>R</dt><dd>Set the selected clip's release to the frame it's showing</dd>
+      <dt>C</dt><dd>Set (or clear) the selected clip's contact frame</dd>
+      <dt>[ / ]</dt><dd>Jump to the previous / next contact frame</dd>
+      <dt>F</dt><dd>Mirror the selected clip</dd>
+      <dt>Z</dt><dd>Reset the selected clip's zoom and pan</dd>
+      <dt>Esc</dt><dd>Leave the selected clip and resync all</dd>
+    </dl>
+    <h2>Mouse</h2>
+    <dl>
+      <dt>Click a clip</dt><dd>Select it</dd>
+      <dt>Drag a clip</dt><dd>Pan inside its frame</dd>
+      <dt>Scroll / pinch</dt><dd>Zoom that clip</dd>
+      <dt>Double-click</dt><dd>Reset zoom and pan</dd>
+      <dt>Drag the timeline</dt><dd>Scrub all clips, or one clip on its own row</dd>
+    </dl>
+    <p class="hint">To sync: select a clip, step to the frame where the ball leaves the hand, press R. Step on to the frame where the racket hits the ball, press C. Repeat for each clip, then press Esc and Enter. Clips glow pink on their contact frame, and the timeline shows each clip's release-to-contact time.</p>
+    <form method="dialog"><button>Close</button></form>
+  </dialog>
+
+  <script src="mp4frames.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

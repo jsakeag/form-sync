@@ -1,0 +1,8 @@
+{
+  "name": "tennis-preview",
+  "private": true,
+  "description": "Side-by-side serve comparison player, synced on the release frame",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
