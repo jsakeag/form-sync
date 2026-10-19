@@ -3,14 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Serve Sync</title>
+  <title>Form Sync</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">Serve Sync</div>
+    <div class="brand">Form Sync</div>
+    <label class="field"><select id="sport" title="Shot type: each has its own clips folder, markers and settings"></select></label>
     <div class="mode" id="mode"></div>
-    <div class="spacer"></div>
+    <button id="ov-toggle" class="toggle-btn" aria-pressed="false" title="Stack two clips on top of each other (O)">Overlay</button>
+    <div class="ov-controls" id="ov-controls" hidden>
+      <label class="field">Base <select id="ov-base"></select></label>
+      <button id="ov-swap" class="icon-btn" title="Swap base and overlay (S)">⇄</button>
+      <label class="field">Over <select id="ov-top"></select></label>
+      <input type="range" id="ov-opacity" min="0" max="100" value="50" title="Opacity of the overlaid clip">
+    </div>
+    <label class="field">Sync on
+      <select id="sync-on" title="Which marker every clip is lined up on"></select>
+    </label>
     <label class="field">Frame
       <select id="aspect" title="Aspect ratio of every clip's frame; clips are letterboxed inside it"></select>
       <input id="aspect-custom" type="text" placeholder="9:16" size="7" hidden>
@@ -31,8 +41,8 @@
         <button id="btn-next" title="Next frame (→, Shift+→ for 10)"><svg viewBox="0 0 16 16"><path d="M5 2v12l8-6zM2 2h2v12H2z"/></svg></button>
         <button id="btn-end" title="Go to end (End)"><svg viewBox="0 0 16 16"><path d="M11 2h2v12h-2zM2 2v12l8-6z"/></svg></button>
       </div>
-      <button id="btn-release" class="release-btn" title="Jump to the release frame (Enter or 0)">Go to release</button>
-      <button id="btn-contact" class="contact-btn" title="Jump to the next clip's contact frame (] next, [ previous)">Next contact</button>
+      <button id="btn-sync" class="marker-btn">Go to sync frame</button>
+      <button id="btn-next-marker" class="marker-btn" title="Jump to the next marker (] next, [ previous)">Next marker</button>
       <div class="readout" id="readout"></div>
       <div class="spacer"></div>
       <label class="field">Speed <select id="rate" title="Playback speed (↑/↓)"></select></label>
@@ -45,7 +55,7 @@
       </div>
       <div id="lanes"></div>
       <div class="tl-overlay">
-        <div class="tl-zero" id="tl-zero"><span>R</span></div>
+        <div class="tl-zero" id="tl-zero"><span></span></div>
         <div class="tl-head" id="tl-head"></div>
       </div>
     </div>
@@ -55,21 +65,7 @@
 
   <dialog id="help">
     <h2>Shortcuts</h2>
-    <dl>
-      <dt>Space</dt><dd>Play / pause</dd>
-      <dt>← / →</dt><dd>Step one frame (hold Shift for 10)</dd>
-      <dt>Home / End</dt><dd>Go to start / end</dd>
-      <dt>Enter or 0</dt><dd>Go to the release frame</dd>
-      <dt>↑ / ↓</dt><dd>Faster / slower</dd>
-      <dt>L</dt><dd>Toggle loop</dd>
-      <dt>1 – 9</dt><dd>Select a clip to adjust on its own</dd>
-      <dt>R</dt><dd>Set the selected clip's release to the frame it's showing</dd>
-      <dt>C</dt><dd>Set (or clear) the selected clip's contact frame</dd>
-      <dt>[ / ]</dt><dd>Jump to the previous / next contact frame</dd>
-      <dt>F</dt><dd>Mirror the selected clip</dd>
-      <dt>Z</dt><dd>Reset the selected clip's zoom and pan</dd>
-      <dt>Esc</dt><dd>Leave the selected clip and resync all</dd>
-    </dl>
+    <dl id="help-keys"></dl>
     <h2>Mouse</h2>
     <dl>
       <dt>Click a clip</dt><dd>Select it</dd>
@@ -77,8 +73,9 @@
       <dt>Scroll / pinch</dt><dd>Zoom that clip</dd>
       <dt>Double-click</dt><dd>Reset zoom and pan</dd>
       <dt>Drag the timeline</dt><dd>Scrub all clips, or one clip on its own row</dd>
+      <dt>In overlay</dt><dd>Drag / scroll moves both clips once they're aligned, or just the top clip if not</dd>
     </dl>
-    <p class="hint">To sync: select a clip, step to the frame where the ball leaves the hand, press R. Step on to the frame where the racket hits the ball, press C. Repeat for each clip, then press Esc and Enter. Clips glow pink on their contact frame, and the timeline shows each clip's release-to-contact time.</p>
+    <p class="hint" id="help-hint"></p>
     <form method="dialog"><button>Close</button></form>
   </dialog>
 

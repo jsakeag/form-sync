@@ -1,0 +1,18 @@
+{
+  "tennis-serve": {
+    "label": "Tennis serve",
+    "syncOn": "release",
+    "markers": [
+      { "id": "release", "label": "Release", "key": "r", "color": "#ffb547", "hint": "Ball leaves the tossing hand" },
+      { "id": "contact", "label": "Contact", "key": "c", "color": "#ff4fa3", "hint": "Racket meets the ball" }
+    ]
+  },
+  "basketball-jumpshot": {
+    "label": "Basketball jump shot",
+    "syncOn": "release",
+    "markers": [
+      { "id": "dip", "label": "Dip", "key": "d", "color": "#3ddbd9", "hint": "Bottom of the load: knees bent, ball at its lowest" },
+      { "id": "release", "label": "Release", "key": "r", "color": "#ffb547", "hint": "Ball leaves the fingertips" }
+    ]
+  }
+}

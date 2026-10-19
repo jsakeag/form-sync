@@ -8,10 +8,8 @@
   --muted: #8a9099;
   --accent: #4da3ff;
   --accent-ink: #001a33;
-  --release: #ffb547;
-  --release-ink: #2a1900;
-  --contact: #ff4fa3;
-  --contact-ink: #2b0016;
+  --warn: #ffb547;
+  --marker-ink: #14100c;
   --label-w: 170px;
   color-scheme: dark;
 }
@@ -25,6 +23,7 @@ body {
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
@@ -50,7 +49,7 @@ select, input[type="text"] {
 
 .spacer { flex: 1; }
 
-.field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
 .field.check { gap: 4px; cursor: pointer; }
 
 /* Top bar */
@@ -58,13 +57,15 @@ select, input[type="text"] {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   padding: 8px 14px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
-.brand { font-weight: 600; }
-.mode { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar > * { flex: none; }
+.brand { font-weight: 600; white-space: nowrap; }
+.topbar > .mode { flex: 1 1 0; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mode b { color: var(--text); font-weight: 600; }
 .mode .pill {
   display: inline-block;
@@ -78,6 +79,11 @@ select, input[type="text"] {
 }
 .mode .pill.adjust { background: var(--accent); color: var(--accent-ink); }
 .icon-btn { width: 28px; height: 28px; padding: 0; border-radius: 50%; }
+.toggle-btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+.ov-controls { display: flex; align-items: center; gap: 8px; }
+.ov-controls[hidden] { display: none; }
+.ov-controls select { max-width: 150px; }
+.ov-controls input[type="range"] { width: 90px; accent-color: var(--accent); }
 
 /* Stage */
 
@@ -91,6 +97,30 @@ select, input[type="text"] {
   min-height: 0;
 }
 .empty { color: var(--muted); }
+
+/* Overlay: the base and top panels share one grid cell; everything else is hidden. */
+.stage.overlay { display: grid; place-items: center; }
+.stage.overlay .panel { grid-area: 1 / 1; }
+.panel[data-role="hidden"] { display: none; }
+.panel[data-role="top"] { z-index: 1; background: transparent; }
+.panel[data-role="top"] video { opacity: var(--ov-opacity, 0.5); }
+.panel[data-role="top"].out video { opacity: calc(var(--ov-opacity, 0.5) * 0.4); }
+.panel[data-role="top"] .chip-name,
+.panel[data-role="top"] .badges { top: 36px; }
+.panel[data-role="top"] .chip-info { bottom: 36px; }
+.panel[data-role="top"] .tools { top: 66px; }
+.panel[data-role="base"] .tools { display: none; }
+.panel[data-role="base"] .chip-name::before { content: "Base · "; color: var(--muted); }
+.panel[data-role="top"] .chip-name::before { content: "Over · "; color: var(--accent); }
+.tl-row.ov-hidden { opacity: 0.35; }
+
+/* Alignment points, drawn over the video in panel coordinates. */
+.align-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.align-layer[hidden] { display: none; }
+.align-layer line { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 4; }
+.align-layer circle { fill: var(--accent); stroke: #fff; stroke-width: 2; }
+.align-layer text { fill: #fff; font-size: 11px; font-weight: 700; paint-order: stroke; stroke: #000; stroke-width: 3px; }
+.panel.picking { cursor: crosshair; }
 
 .panel {
   position: relative;
@@ -114,10 +144,12 @@ select, input[type="text"] {
   border-radius: 6px;
   pointer-events: none;
 }
-.panel.at-release::after { border-color: var(--release); }
-.panel.at-contact::after {
-  border: 4px solid var(--contact);
-  box-shadow: inset 0 0 48px color-mix(in srgb, var(--contact) 45%, transparent);
+/* --hl is the colour of the marker the clip is on; the sync marker gets a thin border,
+   the others a thick border and glow so timing differences stand out. */
+.panel.at-sync::after { border-color: var(--hl); }
+.panel.at-marker::after {
+  border: 4px solid var(--hl);
+  box-shadow: inset 0 0 48px color-mix(in srgb, var(--hl) 45%, transparent);
 }
 
 .panel video {
@@ -159,8 +191,7 @@ select, input[type="text"] {
   text-align: center;
 }
 .chip .dim { color: var(--muted); margin-left: 6px; }
-.chip .unset { color: var(--release); }
-.chip .contact { color: var(--contact); }
+.chip .unset { color: var(--warn); }
 
 .badges {
   position: absolute;
@@ -171,19 +202,16 @@ select, input[type="text"] {
   pointer-events: none;
 }
 .badge {
-  display: none;
   padding: 3px 7px;
   border-radius: 4px;
-  background: var(--release);
-  color: var(--release-ink);
+  background: var(--mk);
+  color: var(--marker-ink);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.badge-contact { background: var(--contact); color: var(--contact-ink); }
-.panel.at-release .badge-release,
-.panel.at-contact .badge-contact { display: block; }
+.badge[hidden] { display: none; }
 
 .tools {
   position: absolute;
@@ -204,8 +232,8 @@ select, input[type="text"] {
   border-color: rgba(255, 255, 255, 0.16);
 }
 .tools button:hover { background: rgba(40, 44, 49, 0.9); }
-.tools button.primary { background: var(--release); color: var(--release-ink); border-color: transparent; font-weight: 600; }
-.tools button.contact { background: var(--contact); color: var(--contact-ink); border-color: transparent; font-weight: 600; }
+.tools button.marker { background: var(--mk); color: var(--marker-ink); border-color: transparent; font-weight: 600; }
+.tools button.marker:hover { filter: brightness(1.1); }
 
 /* Bottom bar */
 
@@ -217,13 +245,13 @@ select, input[type="text"] {
   background: var(--surface);
   border-top: 1px solid var(--border);
 }
-.controls { display: flex; align-items: center; gap: 12px; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .transport { display: flex; gap: 4px; }
 .transport button { display: grid; place-items: center; width: 34px; height: 30px; padding: 0; }
 .transport svg { width: 14px; height: 14px; fill: currentColor; }
 #btn-play { width: 46px; background: var(--accent); color: var(--accent-ink); border-color: transparent; }
-.release-btn { border-color: color-mix(in srgb, var(--release) 50%, var(--border)); color: var(--release); }
-.contact-btn { border-color: color-mix(in srgb, var(--contact) 50%, var(--border)); color: var(--contact); }
+.marker-btn { --mk: var(--text); border-color: color-mix(in srgb, var(--mk) 50%, var(--border)); color: var(--mk); }
+.marker-btn[hidden] { display: none; }
 .readout { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .readout b { color: var(--text); font-weight: 600; }
 
@@ -262,17 +290,17 @@ select, input[type="text"] {
   display: none;
 }
 .tl-row.selected .lane-head { display: block; }
-.lane-contact {
+.lane-tick {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 3px;
   margin-left: -1.5px;
   border-radius: 2px;
-  background: var(--contact);
+  background: var(--mk);
 }
-.lane-contact[hidden] { display: none; }
-.lane-contact-label {
+.lane-tick[hidden] { display: none; }
+.lane-tick-label {
   position: absolute;
   left: 7px;
   top: 50%;
@@ -280,7 +308,7 @@ select, input[type="text"] {
   font-size: 10px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  color: var(--contact);
+  color: var(--mk);
   white-space: nowrap;
 }
 
@@ -293,8 +321,8 @@ select, input[type="text"] {
   pointer-events: none;
 }
 .tl-zero, .tl-head { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; }
-.tl-zero { background: var(--release); }
-.tl-zero span { position: absolute; top: 4px; left: 5px; font-size: 10px; font-weight: 700; color: var(--release); }
+.tl-zero { background: var(--mk, var(--warn)); }
+.tl-zero span { position: absolute; top: 4px; left: 5px; font-size: 10px; font-weight: 700; color: var(--mk, var(--warn)); }
 .tl-head { background: #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
 
 /* Toast + help */

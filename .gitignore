@@ -1,7 +1,6 @@
 .DS_Store
 node_modules/
 
-# Clips and per-clip sync settings are local data, not code
+# Clips and their sync settings (data/<shot type>/sync.json) are local data, not code
 data/*
 !data/.gitkeep
-sync.json
