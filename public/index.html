@@ -17,6 +17,12 @@
       <button id="ov-swap" class="icon-btn" title="Swap base and overlay (S)">⇄</button>
       <label class="field">Over <select id="ov-top"></select></label>
       <input type="range" id="ov-opacity" min="0" max="100" value="50" title="Opacity of the overlaid clip">
+      <label class="field">Align
+        <select id="ov-align" title="Line clips up by body (head and feet) or by the court (projective)">
+          <option value="body">Body</option>
+          <option value="court">Court</option>
+        </select>
+      </label>
     </div>
     <label class="field">Sync on
       <select id="sync-on" title="Which marker every clip is lined up on"></select>
@@ -62,6 +68,17 @@
   </footer>
 
   <div class="toast" id="toast"></div>
+
+  <div class="court-picker" id="court-picker" hidden>
+    <div class="cp-head"><b id="cp-clip"></b> · court points</div>
+    <svg id="cp-diagram" class="cp-diagram"></svg>
+    <div class="cp-hint" id="cp-hint"></div>
+    <div class="cp-actions">
+      <button id="cp-clear">Clear</button>
+      <button id="cp-cancel">Cancel</button>
+      <button id="cp-done" class="primary-btn">Done</button>
+    </div>
+  </div>
 
   <dialog id="help">
     <h2>Shortcuts</h2>

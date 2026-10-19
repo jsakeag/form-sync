@@ -5,7 +5,23 @@
     "markers": [
       { "id": "release", "label": "Release", "key": "r", "color": "#ffb547", "hint": "Ball leaves the tossing hand" },
       { "id": "contact", "label": "Contact", "key": "c", "color": "#ff4fa3", "hint": "Racket meets the ball" }
-    ]
+    ],
+    "court": {
+      "note": "Left and right as the server sees them, facing the net. Metres, origin at the server's centre mark.",
+      "yUp": true,
+      "lines": [
+        { "id": "sb", "label": "Server's baseline", "from": [-5.485, 0], "to": [5.485, 0] },
+        { "id": "ss", "label": "Server's service line", "from": [-4.115, 5.485], "to": [4.115, 5.485] },
+        { "id": "cl", "label": "Centre service line (or a centre mark)", "from": [0, 5.485], "to": [0, 18.285] },
+        { "id": "ls", "label": "Left singles sideline", "from": [-4.115, 0], "to": [-4.115, 23.77] },
+        { "id": "rs", "label": "Right singles sideline", "from": [4.115, 0], "to": [4.115, 23.77] },
+        { "id": "ld", "label": "Left doubles sideline", "from": [-5.485, 0], "to": [-5.485, 23.77] },
+        { "id": "rd", "label": "Right doubles sideline", "from": [5.485, 0], "to": [5.485, 23.77] },
+        { "id": "fs", "label": "Far service line", "from": [-4.115, 18.285], "to": [4.115, 18.285] },
+        { "id": "fb", "label": "Far baseline", "from": [-5.485, 23.77], "to": [5.485, 23.77] }
+      ],
+      "decor": [[0, 0, 0, 0.1], [0, 23.67, 0, 23.77], [-6.4, 11.885, 6.4, 11.885]]
+    }
   },
   "basketball-jumpshot": {
     "label": "Basketball jump shot",
@@ -13,6 +29,24 @@
     "markers": [
       { "id": "dip", "label": "Dip", "key": "d", "color": "#3ddbd9", "hint": "Bottom of the load: knees bent, ball at its lowest" },
       { "id": "release", "label": "Release", "key": "r", "color": "#ffb547", "hint": "Ball leaves the fingertips" }
-    ]
+    ],
+    "court": {
+      "note": "Left and right when facing the basket. NBA dimensions in metres (lane 4.88 m wide); high school and college lanes are 3.66 m, so change the lane x values to ±1.83.",
+      "yUp": false,
+      "lines": [
+        { "id": "base", "label": "Baseline", "from": [-7.62, 0], "to": [7.62, 0] },
+        { "id": "ft", "label": "Free-throw line", "from": [-2.44, 5.79], "to": [2.44, 5.79] },
+        { "id": "ll", "label": "Left lane line", "from": [-2.44, 0], "to": [-2.44, 5.79] },
+        { "id": "rl", "label": "Right lane line", "from": [2.44, 0], "to": [2.44, 5.79] },
+        { "id": "c3l", "label": "Left corner-three line", "from": [-6.71, 0], "to": [-6.71, 4.32] },
+        { "id": "c3r", "label": "Right corner-three line", "from": [6.71, 0], "to": [6.71, 4.32] },
+        { "id": "sl", "label": "Left sideline", "from": [-7.62, 0], "to": [-7.62, 10] },
+        { "id": "sr", "label": "Right sideline", "from": [7.62, 0], "to": [7.62, 10] }
+      ],
+      "arcs": [
+        { "x": 0, "y": 5.79, "r": 1.83, "from": 0, "to": 360 },
+        { "x": 0, "y": 1.6, "r": 7.24, "from": 22.06, "to": 157.94 }
+      ]
+    }
   }
 }

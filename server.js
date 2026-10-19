@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = __dirname;
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const SPORTS_FILE = path.join(ROOT, 'sports.json');
 const PORT = Number(process.env.PORT) || 8765;
@@ -138,6 +138,8 @@ for (const id of Object.keys(sports)) fs.mkdirSync(sportDir(id), { recursive: tr
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Form Sync running at http://localhost:${PORT}`);
   for (const [id, def] of Object.entries(sports)) {
-    console.log(`  ${def.label}: ${listClips(id).length} clip(s) in data/${id}/`);
+    const dir = sportDir(id);
+    const shown = dir.startsWith(ROOT + path.sep) ? path.relative(ROOT, dir) : dir;
+    console.log(`  ${def.label}: ${listClips(id).length} clip(s) in ${shown}/`);
   }
 });

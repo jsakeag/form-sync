@@ -12,7 +12,7 @@ const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 10;
 const START_LATENCY = 0.05; // seconds between play() and frames actually advancing
 const MARKER_HOLD_MS = 350; // keep a marker highlight up long enough to see at full speed
-const RESERVED_KEYS = new Set([' ', 'f', 'z', 'l', 'o', 'a', 's', '?', '[', ']', ...'0123456789']);
+const RESERVED_KEYS = new Set([' ', 'f', 'z', 'l', 'o', 'a', 'g', 's', '?', '[', ']', ...'0123456789']);
 const ALIGN_POINTS = [
   { id: 'head', label: 'H', prompt: 'click the top of the head' },
   { id: 'feet', label: 'F', prompt: 'click the ground between the feet' },
@@ -43,8 +43,9 @@ const state = {
   gMax: 0,
   playing: null, // null | 'sync' | 'solo'
   selected: -1,  // clip being adjusted on its own, -1 = all synced
-  overlay: { on: false, base: '', top: '', opacity: 0.5 }, // base/top are clip names
-  picking: null, // { c, step } while clicking a clip's alignment points
+  overlay: { on: false, base: '', top: '', opacity: 0.5, align: 'body' }, // base/top are clip names
+  picking: null, // { c, kind: 'body' | 'court', points, ... } while placing alignment points
+  court: null,   // shot type's court: named lines in metres, plus decoration for drawing
   panelW: 0,
   panelH: 0,
 };
@@ -191,7 +192,12 @@ async function loadClip({ name, url }) {
     align: Object.fromEntries(ALIGN_POINTS
       .filter(pt => Array.isArray(saved.align?.[pt.id]) && saved.align[pt.id].length === 2)
       .map(pt => [pt.id, saved.align[pt.id]])),
-    view: { tx: 0, ty: 0, z: 1, f: 1 }, // transform currently applied to the video, in px
+    // Clicks along court lines in this clip ({ line id: [[u, v], ...] }) and the
+    // homography they give from the court plane to the video.
+    court: Object.fromEntries(Object.entries(saved.court || {})
+      .filter(([id, pts]) => state.court?.byId[id] && Array.isArray(pts) && pts.every(p => Array.isArray(p) && p.length === 2))),
+    courtH: null,
+    H: null,        // view matrix: normalised video coordinates → panel pixels
     hidden: false,  // not shown (overlay mode with other clips stacked)
     shownIdx: -1,   // frame known to be on screen
     targetIdx: 0,   // frame we want on screen
@@ -200,6 +206,7 @@ async function loadClip({ name, url }) {
     hardSeekAt: 0,
     out: false,
   };
+  c.courtH = fitCourt(c.court);
   video.addEventListener('seeked', () => onSeeked(c));
   return c;
 }
@@ -261,6 +268,7 @@ async function init() {
   }
   writeLocal('sport', state.sport);
   setupMarkers(state.sportDef);
+  setupCourt(state.sportDef);
   if (!state.markers.length) {
     $('#empty').textContent = `${state.sportDef.label} has no markers in sports.json`;
     return;
@@ -309,6 +317,7 @@ async function init() {
   buildLanes();
   buildAspectOptions();
   buildOverlayControls();
+  buildCourtPicker();
   await Promise.all(state.clips.map(calibrate));
   computeRange();
   state.g = clamp(0, state.gMin, state.gMax);
@@ -362,7 +371,8 @@ function buildHelp() {
     ['Z', "Reset the selected clip's zoom and pan"],
     ['O', 'Overlay two clips on top of each other'],
     ['S', 'Swap the base and overlaid clip'],
-    ['A', "Set the selected clip's alignment points: click the head, then the ground between the feet"],
+    ['A', "Set the selected clip's body points for overlay: click the head, then the ground between the feet"],
+    ...(state.court ? [['G', "Mark court lines on the selected clip for overlay: 2 clicks on each of 4+ lines, then Enter"]] : []),
     ['Esc', 'Cancel alignment / leave the selected clip and resync all'],
   ];
   $('#help-keys').replaceChildren(...rows.flatMap(([k, v]) => [el('dt', '', k), el('dd', '', v)]));
@@ -423,7 +433,8 @@ function buildPanels() {
       tools.append(b);
     }
     tools.append(
-      toolButton('Align points', 'For overlay: click the top of the head, then the ground between the feet (A)', () => { select(i); startPicking(); }),
+      toolButton('Body points', 'For overlay: click the top of the head, then the ground between the feet (A)', () => { select(i); startPicking('body'); }),
+      ...(state.court ? [toolButton('Court lines', 'For overlay: click along at least 4 court lines (G)', () => { select(i); startPicking('court'); })] : []),
       toolButton('Flip', 'Mirror horizontally (F)', () => toggleFlip(c)),
       toolButton('Reset view', 'Reset zoom and pan (double-click, Z)', () => resetView(c)),
     );
@@ -431,8 +442,11 @@ function buildPanels() {
     const svg = document.createElementNS(SVG_NS, 'svg');
     svg.classList.add('align-layer');
     svg.setAttribute('hidden', '');
+    const courtPath = document.createElementNS(SVG_NS, 'path');
+    courtPath.setAttribute('class', 'court-lines');
+    const courtDots = document.createElementNS(SVG_NS, 'g');
     const line = document.createElementNS(SVG_NS, 'line');
-    svg.append(line);
+    svg.append(courtPath, courtDots, line);
     const marks = {};
     for (const pt of ALIGN_POINTS) {
       const g = document.createElementNS(SVG_NS, 'g');
@@ -449,7 +463,7 @@ function buildPanels() {
 
     panel.append(c.el, svg, name, info, badges, tools);
     stage.append(panel);
-    c.ui = { panel, info, badges: badgeFor, align: { svg, line, marks } };
+    c.ui = { panel, info, badges: badgeFor, align: { svg, line, marks, courtPath, courtDots } };
     attachPanelInput(c, i);
   });
 }
@@ -634,91 +648,115 @@ function layout() {
   state.clips.forEach(applyView);
 }
 
-// ---------------------------------------------------------------- zoom / pan
+// ---------------------------------------------------------------- geometry
+// 3×3 matrices are flat row-major arrays. A clip's view matrix `c.H` maps normalised video
+// coordinates ([0..1, 0..1] of the source frame) to panel pixels. The CSS transform is
+// derived from it, so plain zoom/pan, body alignment and the projective court alignment
+// all go through the same path.
 
-// Where a normalised video point sits relative to the panel centre before the view
-// transform, given object-fit: contain.
-function fittedSize(c) {
+const M3 = {
+  mul(a, b) {
+    const r = new Array(9);
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) r[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+    }
+    return r;
+  },
+  inv(m) {
+    const [a, b, c, d, e, f, g, h, i] = m;
+    const A = e * i - f * h;
+    const B = f * g - d * i;
+    const C = d * h - e * g;
+    const det = a * A + b * B + c * C;
+    if (!det) return null;
+    return [A, c * h - b * i, b * f - c * e, B, a * i - c * g, c * d - a * f, C, b * g - a * h, a * e - b * d].map(v => v / det);
+  },
+  apply(m, [x, y]) {
+    const w = m[6] * x + m[7] * y + m[8];
+    return [(m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w];
+  },
+  // Like apply, but null for points behind the camera (used when drawing court lines).
+  project(m, [x, y]) {
+    const w = m[6] * x + m[7] * y + m[8];
+    return w > 1e-9 ? [(m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w] : null;
+  },
+  translate: (x, y) => [1, 0, x, 0, 1, y, 0, 0, 1],
+  scale: (sx, sy) => [sx, 0, 0, 0, sy, 0, 0, 0, 1],
+};
+
+// Normalised video point → panel pixel with no view transform (object-fit: contain).
+function fitMatrix(c) {
   const vw = c.el.videoWidth || state.panelW;
   const vh = c.el.videoHeight || state.panelH;
   const s = Math.min(state.panelW / vw, state.panelH / vh);
-  return [vw * s, vh * s];
+  const dw = vw * s;
+  const dh = vh * s;
+  return [dw, 0, (state.panelW - dw) / 2, 0, dh, (state.panelH - dh) / 2, 0, 0, 1];
 }
 
-function fitted(c, [u, v]) {
-  const [dw, dh] = fittedSize(c);
-  return [(u - 0.5) * dw, (v - 0.5) * dh];
-}
-
-// Video point → panel pixel, through a view transform (translate · scale · scaleX(flip)).
-function toPanel(c, view, pt) {
-  const [rx, ry] = fitted(c, pt);
-  return [state.panelW / 2 + view.tx + view.z * view.f * rx, state.panelH / 2 + view.ty + view.z * ry];
-}
-
-function fromPanel(c, x, y) {
-  const { tx, ty, z, f } = c.view;
-  const [dw, dh] = fittedSize(c);
-  return [(x - state.panelW / 2 - tx) / (z * f) / dw + 0.5, (y - state.panelH / 2 - ty) / z / dh + 0.5];
+// Zoom about the panel centre, then pan; f = -1 mirrors.
+function similarity(c, { tx, ty, z, f }) {
+  const cx = state.panelW / 2;
+  const cy = state.panelH / 2;
+  return [M3.translate(cx + tx, cy + ty), M3.scale(z * f, z), M3.translate(-cx, -cy), fitMatrix(c)].reduce(M3.mul);
 }
 
 const ownView = c => ({ tx: c.panX * state.panelW, ty: c.panY * state.panelH, z: c.zoom, f: c.flip ? -1 : 1 });
+const ownMatrix = c => similarity(c, ownView(c));
+const toPanel = (c, pt) => M3.apply(c.H, pt);
+const fromPanel = (c, x, y) => M3.apply(M3.inv(c.H), [x, y]);
 const hasAlign = c => ALIGN_POINTS.every(pt => c.align[pt.id]);
 
-// Transform that puts `top`'s feet on `base`'s feet and scales it to the same
-// head-to-feet length. No rotation, so a lean in one clip stays visible.
-function alignedView(base, top) {
+// Puts `top`'s feet on `base`'s feet and scales it to the same head-to-feet length.
+// No rotation, so a lean in one clip stays visible.
+function bodyAligned(base, top) {
   if (!hasAlign(base) || !hasAlign(top)) return null;
-  const bv = ownView(base);
-  const [hx, hy] = toPanel(base, bv, base.align.head);
-  const [fx, fy] = toPanel(base, bv, base.align.feet);
-  const f = top.flip ? -1 : 1;
-  const [qhx, qhy] = fitted(top, top.align.head);
-  const [qfx, qfy] = fitted(top, top.align.feet);
+  const bm = ownMatrix(base);
+  const [hx, hy] = M3.apply(bm, base.align.head);
+  const [fx, fy] = M3.apply(bm, base.align.feet);
+  const fit = fitMatrix(top);
+  const centred = pt => {
+    const [x, y] = M3.apply(fit, pt);
+    return [x - state.panelW / 2, y - state.panelH / 2];
+  };
+  const [qhx, qhy] = centred(top.align.head);
+  const [qfx, qfy] = centred(top.align.feet);
   const len = Math.hypot(qhx - qfx, qhy - qfy);
   if (len < 1) return null;
+  const f = top.flip ? -1 : 1;
   const z = Math.hypot(hx - fx, hy - fy) / len;
-  return { tx: fx - state.panelW / 2 - z * f * qfx, ty: fy - state.panelH / 2 - z * qfy, z, f };
+  return similarity(top, { tx: fx - state.panelW / 2 - z * f * qfx, ty: fy - state.panelH / 2 - z * qfy, z, f });
+}
+
+// Maps the top clip's court onto the base clip's court: top video → court plane → base
+// video → base panel. Exact on the ground; anything above it (the player) is only as
+// comparable as the two camera positions are similar.
+function courtAligned(base, top) {
+  if (!base.courtH || !top.courtH) return null;
+  const toCourt = M3.inv(top.courtH);
+  return toCourt && [ownMatrix(base), base.courtH, toCourt].reduce(M3.mul);
+}
+
+function alignedMatrix(base, top) {
+  return state.overlay.align === 'court' ? courtAligned(base, top) : bodyAligned(base, top);
 }
 
 function applyView(c) {
+  if (!state.panelW) return;
   const ov = overlayPair();
-  const view = (ov && c === ov.top && alignedView(ov.base, ov.top)) || ownView(c);
-  c.view = view;
-  c.el.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.z}) scaleX(${view.f})`;
-  drawAlign(c);
+  c.H = (ov && c === ov.top && alignedMatrix(ov.base, ov.top)) || ownMatrix(c);
+  // CSS works in the element's own pixels (origin 0 0), so undo the contain fit first.
+  const t = M3.mul(c.H, M3.inv(fitMatrix(c)));
+  c.el.style.transform = `matrix3d(${t[0]},${t[3]},0,${t[6]},${t[1]},${t[4]},0,${t[7]},0,0,1,0,${t[2]},${t[5]},0,${t[8]})`;
+  drawGuides(c);
   if (ov && c === ov.base) applyView(ov.top); // the aligned top clip follows the base
-}
-
-function drawAlign(c) {
-  const { svg, line, marks } = c.ui.align;
-  const picking = state.picking?.c === c;
-  const pts = picking ? state.picking.points : c.align;
-  const show = picking || (state.clips[state.selected] === c && Object.keys(pts).length > 0);
-  svg.toggleAttribute('hidden', !show);
-  if (!show) return;
-  const pos = {};
-  for (const pt of ALIGN_POINTS) {
-    const g = marks[pt.id];
-    g.toggleAttribute('hidden', !pts[pt.id]);
-    if (!pts[pt.id]) continue;
-    pos[pt.id] = toPanel(c, c.view, pts[pt.id]);
-    g.setAttribute('transform', `translate(${pos[pt.id][0]} ${pos[pt.id][1]})`);
-  }
-  line.toggleAttribute('hidden', !(pos.head && pos.feet));
-  if (pos.head && pos.feet) {
-    line.setAttribute('x1', pos.head[0]);
-    line.setAttribute('y1', pos.head[1]);
-    line.setAttribute('x2', pos.feet[0]);
-    line.setAttribute('y2', pos.feet[1]);
-  }
 }
 
 // In overlay mode, once the top clip is aligned, dragging and zooming it moves the base
 // (and the top follows); before that it moves the top clip on its own for manual lining up.
 function viewTarget(c) {
   const ov = overlayPair();
-  return ov && c === ov.top && alignedView(ov.base, ov.top) ? ov.base : c;
+  return ov && c === ov.top && alignedMatrix(ov.base, ov.top) ? ov.base : c;
 }
 
 function resetView(c) {
@@ -793,17 +831,215 @@ function attachPanelInput(c, i) {
   });
 }
 
-// ---------------------------------------------------------------- alignment points
+// ---------------------------------------------------------------- court
+// Court alignment works from clicks along known court lines rather than corners: phone
+// video rarely shows four corners, but almost always shows four lines.
 
-function startPicking() {
+function setupCourt(def) {
+  const court = def.court;
+  if (!court?.lines?.length) {
+    state.court = null;
+    return;
+  }
+  const lines = court.lines.map(l => {
+    const [[x1, y1], [x2, y2]] = [l.from, l.to];
+    // The infinite line aX + bY + c = 0 through the segment, with (a, b) a unit vector.
+    const a = y2 - y1;
+    const b = x1 - x2;
+    const n = Math.hypot(a, b);
+    return { ...l, eq: [a / n, b / n, -(a * x1 + b * y1) / n] };
+  });
+  const polylines = [
+    ...lines.map(l => [l.from, l.to]),
+    ...(court.decor || []).map(([x1, y1, x2, y2]) => [[x1, y1], [x2, y2]]),
+  ];
+  for (const a of court.arcs || []) {
+    const from = ((a.from ?? 0) * Math.PI) / 180;
+    const to = ((a.to ?? 360) * Math.PI) / 180;
+    const pts = [];
+    for (let i = 0; i <= 48; i++) {
+      const t = from + ((to - from) * i) / 48;
+      pts.push([a.x + a.r * Math.cos(t), a.y + a.r * Math.sin(t)]);
+    }
+    polylines.push(pts);
+  }
+  state.court = { ...court, lines, polylines, byId: Object.fromEntries(lines.map(l => [l.id, l])) };
+}
+
+// Solves Gx = b by Gaussian elimination with partial pivoting; null if singular.
+function solveLinear(G, b) {
+  const n = b.length;
+  const A = G.map((row, i) => [...row, b[i]]);
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+    if (Math.abs(A[piv][col]) < 1e-10) return null;
+    [A[col], A[piv]] = [A[piv], A[col]];
+    for (let r = col + 1; r < n; r++) {
+      const k = A[r][col] / A[col][col];
+      for (let j = col; j <= n; j++) A[r][j] -= k * A[col][j];
+    }
+  }
+  const x = new Array(n);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = A[r][n];
+    for (let j = r + 1; j < n; j++) s -= A[r][j] * x[j];
+    x[r] = s / A[r][r];
+  }
+  return x;
+}
+
+// Similarity that centres points on the origin with mean distance √2, which keeps the
+// least-squares system well conditioned.
+function normaliser(pts) {
+  const mx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+  const my = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+  const d = pts.reduce((s, p) => s + Math.hypot(p[0] - mx, p[1] - my), 0) / pts.length || 1;
+  const k = Math.SQRT2 / d;
+  return [k, 0, -k * mx, 0, k, -k * my, 0, 0, 1];
+}
+
+const markedLines = points => Object.entries(points).filter(([id, pts]) => state.court.byId[id] && pts.length >= 2).length;
+
+// Court plane (metres) → normalised video coordinates, from clicks along court lines.
+// A video point p clicked on court line L satisfies Lᵀ·G·p = 0 for the video → court
+// homography G, which is linear in G's entries, so four lines (two clicks each, in two
+// directions) determine it and extra clicks are fitted by least squares.
+function fitCourt(points) {
+  if (!state.court || markedLines(points) < 4) return null;
+  const obs = Object.entries(points).flatMap(([id, pts]) => (state.court.byId[id] ? pts.map(p => [state.court.byId[id], p]) : []));
+  const Tv = normaliser(obs.map(([, p]) => p));
+  const Tc = normaliser(obs.flatMap(([l]) => [l.from, l.to]));
+  const TcInv = M3.inv(Tc);
+  const AtA = Array.from({ length: 8 }, () => new Array(8).fill(0));
+  const Atb = new Array(8).fill(0);
+  for (const [line, p] of obs) {
+    // Lines map by the inverse transpose: L' = Tc⁻ᵀ L.
+    const [l0, l1, l2] = line.eq;
+    let a = TcInv[0] * l0 + TcInv[3] * l1 + TcInv[6] * l2;
+    let b = TcInv[1] * l0 + TcInv[4] * l1 + TcInv[7] * l2;
+    let c = TcInv[2] * l0 + TcInv[5] * l1 + TcInv[8] * l2;
+    const n = Math.hypot(a, b);
+    a /= n; b /= n; c /= n;
+    const [x, y] = M3.apply(Tv, p);
+    const row = [a * x, a * y, a, b * x, b * y, b, c * x, c * y];
+    for (let i = 0; i < 8; i++) {
+      Atb[i] -= row[i] * c;
+      for (let j = 0; j < 8; j++) AtA[i][j] += row[i] * row[j];
+    }
+  }
+  const g = solveLinear(AtA, Atb);
+  if (!g) return null;
+  const G = [TcInv, [...g, 1], Tv].reduce(M3.mul);
+  let H = M3.inv(G);
+  if (!H) return null;
+  // Every clicked point has to come out in front of the camera.
+  const court = obs.map(([, p]) => M3.apply(G, p));
+  const w = ([X, Y]) => H[6] * X + H[7] * Y + H[8];
+  if (w(court[0]) < 0) H = H.map(v => -v);
+  return court.every(X => w(X) > 0) ? H : null;
+}
+
+// Mean distance in panel pixels from each click to its court line as fitted. Only
+// meaningful when there are more clicks than the fit needs.
+function courtFitError(c, points, H) {
+  const obs = Object.entries(points).flatMap(([id, pts]) => (state.court.byId[id] ? pts.map(p => [state.court.byId[id], p]) : []));
+  if (obs.length <= 8) return null;
+  const P = M3.mul(c.H, H);
+  let sum = 0;
+  let n = 0;
+  for (const [line, p] of obs) {
+    const a = M3.project(P, line.from);
+    const b = M3.project(P, line.to);
+    if (!a || !b) continue;
+    const [x, y] = toPanel(c, p);
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (!len) continue;
+    sum += Math.abs((b[0] - a[0]) * (a[1] - y) - (a[0] - x) * (b[1] - a[1])) / len;
+    n++;
+  }
+  return n ? sum / n : null;
+}
+
+// Body points, plus the court's lines projected through the clip's fit and the clicks
+// along them, drawn over the video.
+function drawGuides(c) {
+  const { svg, line, marks, courtPath, courtDots } = c.ui.align;
+  const pk = state.picking?.c === c ? state.picking : null;
+  const selected = selectedClip() === c;
+  const body = pk ? (pk.kind === 'body' ? pk.points : {}) : selected ? c.align : {};
+  const courtPts = pk ? (pk.kind === 'court' ? pk.points : {}) : selected ? c.court : {};
+  const courtH = pk ? pk.fit : c.courtH;
+  const show = !!pk || Object.keys(body).length > 0 || Object.keys(courtPts).length > 0;
+  svg.toggleAttribute('hidden', !show);
+  if (!show || !c.H) return;
+
+  const pos = {};
+  for (const pt of ALIGN_POINTS) {
+    const g = marks[pt.id];
+    g.toggleAttribute('hidden', !body[pt.id]);
+    if (!body[pt.id]) continue;
+    pos[pt.id] = toPanel(c, body[pt.id]);
+    g.setAttribute('transform', `translate(${pos[pt.id][0]} ${pos[pt.id][1]})`);
+  }
+  line.toggleAttribute('hidden', !(pos.head && pos.feet));
+  if (pos.head && pos.feet) {
+    line.setAttribute('x1', pos.head[0]);
+    line.setAttribute('y1', pos.head[1]);
+    line.setAttribute('x2', pos.feet[0]);
+    line.setAttribute('y2', pos.feet[1]);
+  }
+
+  let d = '';
+  if (courtH && Object.keys(courtPts).length) {
+    const P = M3.mul(c.H, courtH);
+    for (const poly of state.court.polylines) {
+      // Subdivide so a segment that runs behind the camera is cut rather than flipped.
+      const pts = poly.length > 2 ? poly : Array.from({ length: 33 }, (_, i) => [
+        poly[0][0] + ((poly[1][0] - poly[0][0]) * i) / 32,
+        poly[0][1] + ((poly[1][1] - poly[0][1]) * i) / 32,
+      ]);
+      let pen = 'M';
+      for (const pt of pts) {
+        const q = M3.project(P, pt);
+        if (!q) { pen = 'M'; continue; }
+        d += `${pen}${q[0].toFixed(1)} ${q[1].toFixed(1)}`;
+        pen = 'L';
+      }
+    }
+  }
+  courtPath.setAttribute('d', d);
+  courtDots.replaceChildren(...Object.entries(courtPts).flatMap(([id, pts]) => pts.map(uv => {
+    const [x, y] = toPanel(c, uv);
+    const dot = document.createElementNS(SVG_NS, 'circle');
+    dot.setAttribute('class', `court-dot${pk?.current === id ? ' current' : ''}`);
+    dot.setAttribute('cx', x);
+    dot.setAttribute('cy', y);
+    dot.setAttribute('r', pk?.current === id ? 5 : 3.5);
+    return dot;
+  })));
+}
+
+// ---------------------------------------------------------------- picking alignment points
+
+function startPicking(kind) {
   const c = selectedClip();
-  if (!c) return toast('Select a clip first (click it or press 1–9), then press A');
-  // New points are kept aside until both are placed, so the overlay doesn't shift between clicks.
-  state.picking = { c, step: 0, points: {} };
+  const key = kind === 'court' ? 'G' : 'A';
+  if (!c) return toast(`Select a clip first (click it or press 1–9), then press ${key}`);
+  if (kind === 'court' && !state.court) return toast(`${state.sportDef.label} has no court in sports.json`);
+  stopPicking();
+  // New points are kept aside until picking finishes, so the overlay doesn't shift mid-way.
+  const points = kind === 'court' ? Object.fromEntries(Object.entries(c.court).map(([id, pts]) => [id, [...pts]])) : {};
+  state.picking = { c, kind, step: 0, points, current: null, fit: null };
+  if (kind === 'court') {
+    state.picking.current = nextLine(points, null);
+    state.picking.fit = fitCourt(points);
+  }
   c.ui.panel.classList.add('picking');
-  drawAlign(c);
+  drawGuides(c);
+  updateCourtPicker();
   updateChrome();
-  toast(`${displayName(c.name)}: ${ALIGN_POINTS[0].prompt}`, 4000);
+  if (kind === 'body') toast(`${displayName(c.name)}: ${ALIGN_POINTS[0].prompt}`, 4000);
 }
 
 function stopPicking() {
@@ -811,7 +1047,27 @@ function stopPicking() {
   if (!pk) return;
   state.picking = null;
   pk.c.ui.panel.classList.remove('picking');
-  drawAlign(pk.c);
+  drawGuides(pk.c);
+  updateCourtPicker();
+  updateChrome();
+}
+
+// First line after `after` (in sports.json order, wrapping) with no clicks yet.
+function nextLine(points, after) {
+  const ids = state.court.lines.map(l => l.id);
+  const start = after ? ids.indexOf(after) + 1 : 0;
+  for (let k = 0; k < ids.length; k++) {
+    const id = ids[(start + k) % ids.length];
+    if (!points[id]?.length) return id;
+  }
+  return null;
+}
+
+function refreshCourtPicking() {
+  const pk = state.picking;
+  pk.fit = fitCourt(pk.points);
+  drawGuides(pk.c);
+  updateCourtPicker();
   updateChrome();
 }
 
@@ -822,24 +1078,150 @@ function pickPoint(panel, e) {
   const pk = state.picking;
   if (!overlayPair() && panel !== pk.c.ui.panel) return toast(`Click on ${displayName(pk.c.name)} to place its points (Esc cancels)`);
   const r = panel.getBoundingClientRect();
-  const pt = ALIGN_POINTS[pk.step];
-  pk.points[pt.id] = fromPanel(pk.c, e.clientX - r.left, e.clientY - r.top);
+  const uv = fromPanel(pk.c, e.clientX - r.left, e.clientY - r.top);
+
+  if (pk.kind === 'court') {
+    if (!pk.current) return toast('Pick a line in the court diagram first');
+    // Stays on this line until another is picked, so extra clicks along it all count.
+    (pk.points[pk.current] ||= []).push(uv);
+    refreshCourtPicking();
+    return;
+  }
+
+  pk.points[ALIGN_POINTS[pk.step].id] = uv;
   pk.step++;
   if (pk.step < ALIGN_POINTS.length) {
-    drawAlign(pk.c);
+    drawGuides(pk.c);
+    updateChrome();
     toast(`${displayName(pk.c.name)}: now ${ALIGN_POINTS[pk.step].prompt}`, 4000);
     return;
   }
   const c = pk.c;
   c.align = pk.points;
+  finishPicking(c, hasAlign, 'Body points set');
+}
+
+function finishCourtPicking() {
+  const pk = state.picking;
+  const fit = fitCourt(pk.points);
+  if (!fit) return toast('Mark at least 4 lines with 2 clicks each, with lines running in both directions');
+  const c = pk.c;
+  c.court = Object.fromEntries(Object.entries(pk.points).filter(([, pts]) => pts.length));
+  c.courtH = fit;
+  const err = courtFitError(c, c.court, fit);
+  finishPicking(c, x => !!x.courtH, `Court fitted from ${markedLines(c.court)} lines${err == null ? '' : ` (clicks off by ${err.toFixed(1)} px on average)`}`);
+}
+
+function finishPicking(c, ready, message) {
   stopPicking();
   state.clips.forEach(applyView);
   saveConfig();
   const ov = overlayPair();
   const partner = ov && (c === ov.base ? ov.top : c === ov.top ? ov.base : null);
-  toast(partner && !hasAlign(partner)
-    ? `${displayName(c.name)} aligned. Set points on ${displayName(partner.name)} too to line them up.`
-    : `${displayName(c.name)}: alignment points set`);
+  toast(partner && !ready(partner)
+    ? `${displayName(c.name)}: ${message.toLowerCase()}. Do ${displayName(partner.name)} too to line them up.`
+    : `${displayName(c.name)}: ${message.toLowerCase()}`, 4000);
+}
+
+// Undo the last click on the current line.
+function removeCourtPoint() {
+  const pk = state.picking;
+  const pts = pk.points[pk.current];
+  if (pts?.length) pts.pop();
+  if (pts && !pts.length) delete pk.points[pk.current];
+  refreshCourtPicking();
+}
+
+function clearCourtPoints() {
+  const pk = state.picking;
+  pk.points = {};
+  pk.current = nextLine(pk.points, null);
+  refreshCourtPicking();
+}
+
+function selectCourtLine(id) {
+  if (state.picking?.kind !== 'court') return;
+  state.picking.current = id;
+  drawGuides(state.picking.c);
+  updateCourtPicker();
+  updateChrome();
+}
+
+function buildCourtPicker() {
+  $('#cp-done').addEventListener('click', finishCourtPicking);
+  $('#cp-cancel').addEventListener('click', stopPicking);
+  $('#cp-clear').addEventListener('click', clearCourtPoints);
+  for (const id of ['#cp-done', '#cp-cancel', '#cp-clear']) $(id).addEventListener('mousedown', e => e.preventDefault());
+  if (!state.court) return;
+
+  const svg = $('#cp-diagram');
+  const flip = state.court.yUp ? -1 : 1; // facing the net / basket is always "up" in the diagram
+  const pts = state.court.polylines.flat();
+  const xs = pts.map(p => p[0]);
+  const ys = pts.map(p => p[1] * flip);
+  const pad = 1;
+  const [x0, x1, y0, y1] = [Math.min(...xs) - pad, Math.max(...xs) + pad, Math.min(...ys) - pad, Math.max(...ys) + pad];
+  svg.setAttribute('viewBox', `${x0} ${y0} ${x1 - x0} ${y1 - y0}`);
+  const pathOf = poly => poly.map((p, i) => `${i ? 'L' : 'M'}${p[0]} ${p[1] * flip}`).join('');
+
+  const decor = document.createElementNS(SVG_NS, 'path');
+  decor.setAttribute('class', 'cl');
+  decor.setAttribute('d', state.court.polylines.slice(state.court.lines.length).map(pathOf).join(''));
+  svg.append(decor);
+  for (const l of state.court.lines) {
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', 'fit-line');
+    g.dataset.id = l.id;
+    for (const cls of ['stroke', 'hit']) {
+      const p = document.createElementNS(SVG_NS, 'path');
+      p.setAttribute('class', cls);
+      p.setAttribute('d', pathOf([l.from, l.to]));
+      g.append(p);
+    }
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = l.label;
+    g.append(title);
+    g.addEventListener('click', () => selectCourtLine(l.id));
+    svg.append(g);
+  }
+}
+
+function updateCourtPicker() {
+  const box = $('#court-picker');
+  const pk = state.picking?.kind === 'court' ? state.picking : null;
+  box.hidden = !pk;
+  if (!pk) return;
+
+  // Sit beside the clip being marked rather than on top of it.
+  const pr = pk.c.ui.panel.getBoundingClientRect();
+  const onLeft = pr.left + pr.width / 2 > innerWidth / 2;
+  box.style.left = onLeft ? '14px' : '';
+  box.style.right = onLeft ? '' : '14px';
+  box.style.top = `${$('.topbar').getBoundingClientRect().bottom + 12}px`;
+
+  $('#cp-clip').textContent = displayName(pk.c.name);
+  for (const g of $('#cp-diagram').querySelectorAll('.fit-line')) {
+    const n = pk.points[g.dataset.id]?.length || 0;
+    g.classList.toggle('marked', n >= 2);
+    g.classList.toggle('partial', n === 1);
+    g.classList.toggle('current', g.dataset.id === pk.current);
+  }
+  const marked = markedLines(pk.points);
+  const hint = $('#cp-hint');
+  hint.replaceChildren();
+  if (pk.current) {
+    const n = pk.points[pk.current]?.length || 0;
+    hint.append('Click 2 or more points along ', el('b', '', state.court.byId[pk.current].label), n ? ` (${n} so far)` : '',
+      ', then pick the next line in the diagram or press Tab.');
+  } else {
+    hint.append('Pick a line in the diagram.');
+  }
+  const status = marked < 4 ? ` (need 4, in both directions)` : pk.fit ? ' · fitted' : " · can't fit yet: add lines running the other way";
+  hint.append(el('br'), `${marked} line${marked === 1 ? '' : 's'} marked${status}`);
+  const err = pk.fit && courtFitError(pk.c, pk.points, pk.fit);
+  if (err != null) hint.append(`, clicks off by ${err.toFixed(1)} px`);
+  hint.append(el('br'), 'Skip lines that are out of shot · Backspace undoes a click · Enter finishes · Esc cancels');
+  if (state.court.note) hint.append(el('br'), el('br'), state.court.note);
 }
 
 // ---------------------------------------------------------------- overlay
@@ -880,6 +1262,27 @@ function buildOverlayControls() {
     stage.style.setProperty('--ov-opacity', state.overlay.opacity);
   });
   opacity.addEventListener('change', () => { opacity.blur(); saveConfig(); });
+
+  const align = $('#ov-align');
+  align.querySelector('option[value="court"]').disabled = !state.court;
+  if (!state.court) state.overlay.align = 'body';
+  align.addEventListener('change', () => {
+    state.overlay.align = align.value;
+    align.blur();
+    applyOverlayLayout();
+    saveConfig();
+    alignmentHint();
+  });
+}
+
+function alignmentHint() {
+  const ov = overlayPair();
+  if (!ov) return;
+  if (state.overlay.align === 'court' && !(ov.base.courtH && ov.top.courtH)) {
+    toast('Press G on each clip and click along at least 4 court lines to line up the courts', 5000);
+  } else if (state.overlay.align === 'body' && !(hasAlign(ov.base) && hasAlign(ov.top))) {
+    toast('Press A on each clip to set body points, or drag the top clip into place', 5000);
+  }
 }
 
 function setOverlay(on) {
@@ -887,10 +1290,7 @@ function setOverlay(on) {
   state.overlay.on = on;
   applyOverlayLayout();
   saveConfig();
-  const ov = overlayPair();
-  if (ov && !(hasAlign(ov.base) && hasAlign(ov.top))) {
-    toast('Press A on each clip to set alignment points, or drag the top clip into place', 5000);
-  }
+  alignmentHint();
 }
 
 function swapOverlay() {
@@ -923,7 +1323,9 @@ function applyOverlayLayout() {
     $('#ov-top').value = ov.top.name;
   }
   $('#ov-opacity').value = String(Math.round(state.overlay.opacity * 100));
+  $('#ov-align').value = state.overlay.align;
   layout();
+  updateCourtPicker();
 }
 
 // ---------------------------------------------------------------- frame display
@@ -1059,9 +1461,12 @@ function updateChrome() {
   const sm = syncMarker();
   mode.replaceChildren();
   if (state.picking) {
-    const pt = ALIGN_POINTS[state.picking.step];
-    mode.append(el('span', 'pill adjust', 'Aligning'), el('b', '', displayName(state.picking.c.name)),
-      `  ${pt.prompt} · Esc cancel`);
+    const pk = state.picking;
+    const what = pk.kind === 'court'
+      ? (pk.current ? `click along the ${state.court.byId[pk.current].label.toLowerCase()}` : 'pick a line in the diagram') + ' · Enter done'
+      : ALIGN_POINTS[pk.step].prompt;
+    mode.append(el('span', 'pill adjust', pk.kind === 'court' ? 'Court points' : 'Body points'),
+      el('b', '', displayName(pk.c.name)), `  ${what} · Esc cancel`);
   } else if (c) {
     const keys = state.markers.filter(m => m.key).map(m => `${keyLabel(m)} ${lower(m)}`);
     mode.append(el('span', 'pill adjust', 'Adjusting'), el('b', '', displayName(c.name)),
@@ -1303,14 +1708,14 @@ function select(i) {
   if (state.picking && state.picking.c !== state.clips[i]) stopPicking();
   const prev = selectedClip();
   state.selected = i;
-  if (prev) drawAlign(prev);
+  if (prev) drawGuides(prev);
   const c = selectedClip();
   if (c) {
     c.localIdx = c.targetIdx;
     setOut(c, false);
     seekIdx(c, c.localIdx);
     updateInfo(c, c.localIdx);
-    drawAlign(c);
+    drawGuides(c);
   }
   renderSynced();
   updateChrome();
@@ -1371,6 +1776,7 @@ function saveConfig() {
         panY: +c.panY.toFixed(4),
         flip: c.flip,
         align: Object.fromEntries(Object.entries(c.align).map(([k, [u, v]]) => [k, [+u.toFixed(4), +v.toFixed(4)]])),
+        court: Object.fromEntries(Object.entries(c.court).map(([k, pts]) => [k, pts.map(([u, v]) => [+u.toFixed(5), +v.toFixed(5)])])),
       };
     }
     savedClips = clips;
@@ -1397,6 +1803,12 @@ document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.target.matches('input[type="text"], textarea')) return;
   if ($('#help').open && e.key !== '?') return;
+  if (state.picking?.kind === 'court' && ['Enter', 'Backspace', 'Delete', 'Tab'].includes(e.key)) {
+    e.preventDefault();
+    if (e.key === 'Enter') return finishCourtPicking();
+    if (e.key === 'Tab') return selectCourtLine(nextLine(state.picking.points, state.picking.current) || state.picking.current);
+    return removeCourtPoint();
+  }
 
   const c = selectedClip();
   let handled = true;
@@ -1416,7 +1828,8 @@ document.addEventListener('keydown', e => {
       break;
     case 'o': case 'O': setOverlay(!state.overlay.on); break;
     case 's': case 'S': swapOverlay(); break;
-    case 'a': case 'A': startPicking(); break;
+    case 'a': case 'A': startPicking('body'); break;
+    case 'g': case 'G': startPicking('court'); break;
     case ']': goToMarker(1); break;
     case '[': goToMarker(-1); break;
     case 'f': case 'F': if (c) toggleFlip(c); break;
