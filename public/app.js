@@ -195,7 +195,9 @@ async function loadClip({ name, url }) {
     // Clicks along court lines in this clip ({ line id: [[u, v], ...] }) and the
     // homography they give from the court plane to the video.
     court: Object.fromEntries(Object.entries(saved.court || {})
-      .filter(([id, pts]) => state.court?.byId[id] && Array.isArray(pts) && pts.every(p => Array.isArray(p) && p.length === 2))),
+      .filter(([id, pts]) => state.court?.byId[id] && Array.isArray(pts))
+      .map(([id, pts]) => [id, pts.filter(p => Array.isArray(p) && p.length === 2 && inPicture(p))])
+      .filter(([, pts]) => pts.length)),
     courtH: null,
     H: null,        // view matrix: normalised video coordinates → panel pixels
     hidden: false,  // not shown (overlay mode with other clips stacked)
@@ -706,6 +708,9 @@ const ownMatrix = c => similarity(c, ownView(c));
 const toPanel = (c, pt) => M3.apply(c.H, pt);
 const fromPanel = (c, x, y) => M3.apply(M3.inv(c.H), [x, y]);
 const hasAlign = c => ALIGN_POINTS.every(pt => c.align[pt.id]);
+// Clicks have to land on the picture: a guess at where a line runs off-screen hurts more
+// than leaving the line out.
+const inPicture = uv => uv.every(x => x >= -0.003 && x <= 1.003);
 
 // Puts `top`'s feet on `base`'s feet and scales it to the same head-to-feet length.
 // No rotation, so a lean in one clip stays visible.
@@ -899,7 +904,9 @@ function normaliser(pts) {
   return [k, 0, -k * mx, 0, k, -k * my, 0, 0, 1];
 }
 
-const markedLines = points => Object.entries(points).filter(([id, pts]) => state.court.byId[id] && pts.length >= 2).length;
+// Lines with at least two clicks; a single click doesn't pin a line down, so it's left out.
+const fittedLines = points => Object.entries(points).filter(([id, pts]) => state.court.byId[id] && pts.length >= 2);
+const markedLines = points => fittedLines(points).length;
 
 // Court plane (metres) → normalised video coordinates, from clicks along court lines.
 // A video point p clicked on court line L satisfies Lᵀ·G·p = 0 for the video → court
@@ -907,7 +914,7 @@ const markedLines = points => Object.entries(points).filter(([id, pts]) => state
 // directions) determine it and extra clicks are fitted by least squares.
 function fitCourt(points) {
   if (!state.court || markedLines(points) < 4) return null;
-  const obs = Object.entries(points).flatMap(([id, pts]) => (state.court.byId[id] ? pts.map(p => [state.court.byId[id], p]) : []));
+  const obs = fittedLines(points).flatMap(([id, pts]) => pts.map(p => [state.court.byId[id], p]));
   const Tv = normaliser(obs.map(([, p]) => p));
   const Tc = normaliser(obs.flatMap(([l]) => [l.from, l.to]));
   const TcInv = M3.inv(Tc);
@@ -940,25 +947,44 @@ function fitCourt(points) {
   return court.every(X => w(X) > 0) ? H : null;
 }
 
-// Mean distance in panel pixels from each click to its court line as fitted. Only
-// meaningful when there are more clicks than the fit needs.
-function courtFitError(c, points, H) {
-  const obs = Object.entries(points).flatMap(([id, pts]) => (state.court.byId[id] ? pts.map(p => [state.court.byId[id], p]) : []));
-  if (obs.length <= 8) return null;
-  const P = M3.mul(c.H, H);
-  let sum = 0;
-  let n = 0;
-  for (const [line, p] of obs) {
-    const a = M3.project(P, line.from);
-    const b = M3.project(P, line.to);
+const clickCount = points => fittedLines(points).reduce((n, [, pts]) => n + pts.length, 0);
+
+// Mean distance, in pixels of the source video, from each line's clicks to that line as
+// fitted. The fit needs exactly 8 clicks, so only extra clicks can reveal a mistake.
+function courtLineErrors(c, points, H) {
+  const W = c.el.videoWidth || 1;
+  const Hv = c.el.videoHeight || 1;
+  const out = {};
+  for (const [id, pts] of fittedLines(points)) {
+    const line = state.court.byId[id];
+    const a = M3.project(H, line.from);
+    const b = M3.project(H, line.to);
     if (!a || !b) continue;
-    const [x, y] = toPanel(c, p);
-    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const [ax, ay, bx, by] = [a[0] * W, a[1] * Hv, b[0] * W, b[1] * Hv];
+    const len = Math.hypot(bx - ax, by - ay);
     if (!len) continue;
-    sum += Math.abs((b[0] - a[0]) * (a[1] - y) - (a[0] - x) * (b[1] - a[1])) / len;
-    n++;
+    out[id] = pts.reduce((s, [u, v]) => s + Math.abs((bx - ax) * (ay - v * Hv) - (ax - u * W) * (by - ay)) / len, 0) / pts.length;
   }
-  return n ? sum / n : null;
+  return out;
+}
+
+// A line is flagged when its clicks sit more than this fraction of the frame height off the fit.
+const OFF_LINE = 0.006;
+
+function courtFitError(c, points, H) {
+  if (clickCount(points) <= 8) return null;
+  const errs = courtLineErrors(c, points, H);
+  const ids = Object.keys(errs);
+  const n = ids.reduce((s, id) => s + points[id].length, 0);
+  return n ? ids.reduce((s, id) => s + errs[id] * points[id].length, 0) / n : null;
+}
+
+// The worst line, if it's far enough off to be a mis-click or the wrong line.
+function worstCourtLine(c, points, H) {
+  if (clickCount(points) <= 8) return null;
+  const errs = courtLineErrors(c, points, H);
+  const id = Object.keys(errs).sort((a, b) => errs[b] - errs[a])[0];
+  return id && errs[id] > OFF_LINE * (c.el.videoHeight || 1) ? { id, err: errs[id], errs } : null;
 }
 
 // Body points, plus the court's lines projected through the clip's fit and the clicks
@@ -1079,6 +1105,9 @@ function pickPoint(panel, e) {
   if (!overlayPair() && panel !== pk.c.ui.panel) return toast(`Click on ${displayName(pk.c.name)} to place its points (Esc cancels)`);
   const r = panel.getBoundingClientRect();
   const uv = fromPanel(pk.c, e.clientX - r.left, e.clientY - r.top);
+  if (!inPicture(uv)) {
+    return toast(pk.kind === 'court' ? 'Click on the picture itself. Skip lines that are out of shot.' : 'Click on the picture itself');
+  }
 
   if (pk.kind === 'court') {
     if (!pk.current) return toast('Pick a line in the court diagram first');
@@ -1109,7 +1138,9 @@ function finishCourtPicking() {
   c.court = Object.fromEntries(Object.entries(pk.points).filter(([, pts]) => pts.length));
   c.courtH = fit;
   const err = courtFitError(c, c.court, fit);
-  finishPicking(c, x => !!x.courtH, `Court fitted from ${markedLines(c.court)} lines${err == null ? '' : ` (clicks off by ${err.toFixed(1)} px on average)`}`);
+  const worst = worstCourtLine(c, c.court, fit);
+  finishPicking(c, x => !!x.courtH, `Court fitted from ${markedLines(c.court)} lines${err == null ? '' : ` (clicks off by ${err.toFixed(1)} px on average)`}${
+    worst ? `. Check the ${state.court.byId[worst.id].label}, it's ${worst.err.toFixed(0)} px off` : ''}`);
 }
 
 function finishPicking(c, ready, message) {
@@ -1123,12 +1154,12 @@ function finishPicking(c, ready, message) {
     : `${displayName(c.name)}: ${message.toLowerCase()}`, 4000);
 }
 
-// Undo the last click on the current line.
-function removeCourtPoint() {
+// Remove every click on the current line.
+function removeCourtLine() {
   const pk = state.picking;
-  const pts = pk.points[pk.current];
-  if (pts?.length) pts.pop();
-  if (pts && !pts.length) delete pk.points[pk.current];
+  if (!pk.points[pk.current]) return;
+  delete pk.points[pk.current];
+  toast(`Removed the ${state.court.byId[pk.current].label.toLowerCase()}`, 1500);
   refreshCourtPicking();
 }
 
@@ -1200,10 +1231,13 @@ function updateCourtPicker() {
   box.style.top = `${$('.topbar').getBoundingClientRect().bottom + 12}px`;
 
   $('#cp-clip').textContent = displayName(pk.c.name);
+  const worst = pk.fit && worstCourtLine(pk.c, pk.points, pk.fit);
+  const tol = OFF_LINE * (pk.c.el.videoHeight || 1);
   for (const g of $('#cp-diagram').querySelectorAll('.fit-line')) {
     const n = pk.points[g.dataset.id]?.length || 0;
     g.classList.toggle('marked', n >= 2);
     g.classList.toggle('partial', n === 1);
+    g.classList.toggle('off', !!worst && worst.errs[g.dataset.id] > tol);
     g.classList.toggle('current', g.dataset.id === pk.current);
   }
   const marked = markedLines(pk.points);
@@ -1211,8 +1245,8 @@ function updateCourtPicker() {
   hint.replaceChildren();
   if (pk.current) {
     const n = pk.points[pk.current]?.length || 0;
-    hint.append('Click 2 or more points along ', el('b', '', state.court.byId[pk.current].label), n ? ` (${n} so far)` : '',
-      ', then pick the next line in the diagram or press Tab.');
+    hint.append('Click 2 or more points on ', el('b', '', state.court.byId[pk.current].label), n ? ` (${n} so far)` : '',
+      ' anywhere along the part you can see, then pick the next line or press Tab.');
   } else {
     hint.append('Pick a line in the diagram.');
   }
@@ -1220,7 +1254,13 @@ function updateCourtPicker() {
   hint.append(el('br'), `${marked} line${marked === 1 ? '' : 's'} marked${status}`);
   const err = pk.fit && courtFitError(pk.c, pk.points, pk.fit);
   if (err != null) hint.append(`, clicks off by ${err.toFixed(1)} px`);
-  hint.append(el('br'), 'Skip lines that are out of shot · Backspace undoes a click · Enter finishes · Esc cancels');
+  if (pk.fit && clickCount(pk.points) <= 8) {
+    hint.append(el('br'), 'Mark a 5th line (or click a line a 3rd time) so mistakes can show up.');
+  } else if (worst) {
+    hint.append(el('br'), el('span', 'cp-warn',
+      `${state.court.byId[worst.id].label} is ${worst.err.toFixed(0)} px off the fit (red). Pick it and press Backspace to remove it, then re-click it carefully or leave it out.`));
+  }
+  hint.append(el('br'), 'Skip lines that are out of shot · Backspace removes the current line · Enter finishes · Esc cancels');
   if (state.court.note) hint.append(el('br'), el('br'), state.court.note);
 }
 
@@ -1807,7 +1847,7 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     if (e.key === 'Enter') return finishCourtPicking();
     if (e.key === 'Tab') return selectCourtLine(nextLine(state.picking.points, state.picking.current) || state.picking.current);
-    return removeCourtPoint();
+    return removeCourtLine();
   }
 
   const c = selectedClip();

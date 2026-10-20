@@ -10,6 +10,7 @@
   --accent-ink: #001a33;
   --warn: #ffb547;
   --court: #7cfc9a;
+  --bad: #ff7a7a;
   --marker-ink: #14100c;
   --label-w: 170px;
   color-scheme: dark;
@@ -151,9 +152,11 @@ select, input[type="text"] {
 .cp-diagram .fit-line:hover .stroke { stroke: #fff; stroke-width: 3; }
 .cp-diagram .fit-line.partial .stroke { stroke: var(--court); stroke-dasharray: 4 3; }
 .cp-diagram .fit-line.marked .stroke { stroke: var(--court); stroke-width: 3; }
+.cp-diagram .fit-line.off .stroke { stroke: var(--bad); stroke-width: 3; stroke-dasharray: none; }
 .cp-diagram .fit-line.current .stroke { stroke: var(--warn); stroke-width: 4; stroke-dasharray: none; }
 .cp-hint { font-size: 12px; color: var(--muted); }
 .cp-hint b { color: var(--text); font-weight: 600; }
+.cp-warn { color: var(--bad); }
 .cp-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .primary-btn { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
 .primary-btn:hover { background: var(--accent); filter: brightness(1.1); }
